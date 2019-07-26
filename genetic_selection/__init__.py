@@ -40,6 +40,33 @@ creator.create("Fitness", base.Fitness, weights=(1.0, -1.0))
 creator.create("Individual", list, fitness=creator.Fitness)
 
 
+def check_ts_X_y(X, y, *args, **kwargs):
+    try:
+        X, y = check_X_y(X, y, *args, **kwargs)
+    except ValueError as e:
+        if str(e).startswith('Found array with dim'):
+            return X, y
+        else:
+            raise
+
+
+def check_ts_array(X, *args, **kwargs):
+    try:
+        X = check_array(X, *args, **kwargs)
+    except ValueError as e:
+        if str(e).startswith('Found array with dim'):
+            return X
+        else:
+            raise
+
+
+def apply_mask(X, mask, feature_axis=1):
+    _X = X.swapaxes(0, feature_axis)
+    _X = _X[mask]
+    _X = _X.swapaxes(0, feature_axis)
+    return _X
+
+
 def _eaFunction(population, toolbox, cxpb, mutpb, ngen, ngen_no_change=None, stats=None,
                 halloffame=None, verbose=0):
     logbook = tools.Logbook()
@@ -105,14 +132,15 @@ def _eaFunction(population, toolbox, cxpb, mutpb, ngen, ngen_no_change=None, sta
 
 
 def _evalFunction(individual, gaobject, estimator, X, y, cv, scorer, verbose, fit_params,
-                  max_features, caching):
+                  max_features, caching, feature_axis):
     individual_sum = np.sum(individual, axis=0)
     if individual_sum == 0 or individual_sum > max_features:
         return -10000, individual_sum
     individual_tuple = tuple(individual)
     if caching and individual_tuple in gaobject.scores_cache:
         return gaobject.scores_cache[individual_tuple], individual_sum
-    X_selected = X[:, np.array(individual, dtype=np.bool)]
+    mask = np.array(individual, dtype=np.bool)
+    X_selected = apply_mask(X, mask, feature_axis=feature_axis)
     scores = []
     for train, test in cv.split(X, y):
         score = _fit_and_score(estimator=estimator, X=X_selected, y=y, scorer=scorer,
@@ -394,3 +422,338 @@ class GeneticSelectionCV(BaseEstimator, MetaEstimatorMixin, SelectorMixin):
     @if_delegate_has_method(delegate='estimator')
     def predict_log_proba(self, X):
         return self.estimator_.predict_log_proba(self.transform(X))
+
+
+class GeneticSelectionCV3D(GeneticSelectionCV):
+    """Feature selection with genetic algorithm.
+
+    Parameters
+    ----------
+    estimator : object
+        A supervised learning estimator with a `fit` method.
+
+    cv : int, cross-validation generator or an iterable, optional
+        Determines the cross-validation splitting strategy.
+        Possible inputs for cv are:
+
+        - None, to use the default 3-fold cross-validation,
+        - integer, to specify the number of folds.
+        - An object to be used as a cross-validation generator.
+        - An iterable yielding train/test splits.
+
+        For integer/None inputs, if ``y`` is binary or multiclass,
+        :class:`StratifiedKFold` used. If the estimator is a classifier
+        or if ``y`` is neither binary nor multiclass, :class:`KFold` is used.
+
+        Refer :ref:`User Guide <cross_validation>` for the various
+        cross-validation strategies that can be used here.
+
+    scoring : string, callable or None, optional, default: None
+        A string (see model evaluation documentation) or
+        a scorer callable object / function with signature
+        ``scorer(estimator, X, y)``.
+
+    fit_params : dict, optional
+        Parameters to pass to the fit method.
+
+    max_features : int or None, optional
+        The maximum number of features selected.
+
+    verbose : int, default=0
+        Controls verbosity of output.
+
+    n_jobs : int, default 1
+        Number of cores to run in parallel.
+        Defaults to 1 core. If `n_jobs=-1`, then number of jobs is set
+        to number of cores.
+
+    n_population : int, default=300
+        Number of population for the genetic algorithm.
+
+    crossover_proba : float, default=0.5
+        Probability of crossover for the genetic algorithm.
+
+    mutation_proba : float, default=0.2
+        Probability of mutation for the genetic algorithm.
+
+    n_generations : int, default=40
+        Number of generations for the genetic algorithm.
+
+    crossover_independent_proba : float, default=0.1
+        Independent probability for each attribute to be exchanged, for the genetic algorithm.
+
+    mutation_independent_proba : float, default=0.05
+        Independent probability for each attribute to be mutated, for the genetic algorithm.
+
+    tournament_size : int, default=3
+        Tournament size for the genetic algorithm.
+
+    n_gen_no_change : int, default None
+        If set to a number, it will terminate optimization when best individual is not
+        changing in all of the previous ``n_gen_no_change`` number of generations.
+
+    caching : boolean, default=False
+        If True, scores of the genetic algorithm are cached.
+
+    Attributes
+    ----------
+    n_features_ : int
+        The number of selected features with cross-validation.
+
+    support_ : array of shape [n_features]
+        The mask of selected features.
+
+    generation_scores_ : array of shape [n_generations]
+        The maximum cross-validation score for each generation.
+
+    estimator_ : object
+        The external estimator fit on the reduced dataset.
+
+    Examples
+    --------
+    An example showing genetic feature selection.
+
+    >>> import numpy as np
+    >>> from sklearn import datasets, linear_model
+    >>> from genetic_selection import GeneticSelectionCV
+    >>> iris = datasets.load_iris()
+    >>> E = np.random.uniform(0, 0.1, size=(len(iris.data), 20))
+    >>> X = np.hstack((iris.data, E))
+    >>> y = iris.target
+    >>> estimator = linear_model.LogisticRegression(solver="liblinear", multi_class="ovr")
+    >>> selector = GeneticSelectionCV(estimator, cv=5)
+    >>> selector = selector.fit(X, y)
+    >>> selector.support_ # doctest: +NORMALIZE_WHITESPACE
+    array([ True  True  True  True False False False False False False False False
+           False False False False False False False False False False False False], dtype=bool)
+    """
+    def __init__(self, estimator, cv=None, scoring=None, fit_params=None, max_features=None,
+                 verbose=0, n_jobs=1, n_population=300, crossover_proba=0.5, mutation_proba=0.2,
+                 n_generations=40, crossover_independent_proba=0.1,
+                 mutation_independent_proba=0.05, tournament_size=3, n_gen_no_change=None,
+                 caching=False):
+        self.estimator = estimator
+        self.cv = cv
+        self.scoring = scoring
+        self.fit_params = fit_params
+        self.max_features = max_features
+        self.verbose = verbose
+        self.n_jobs = n_jobs
+        self.n_population = n_population
+        self.crossover_proba = crossover_proba
+        self.mutation_proba = mutation_proba
+        self.n_generations = n_generations
+        self.crossover_independent_proba = crossover_independent_proba
+        self.mutation_independent_proba = mutation_independent_proba
+        self.tournament_size = tournament_size
+        self.n_gen_no_change = n_gen_no_change
+        self.caching = caching
+        self.scores_cache = {}
+
+    @property
+    def _estimator_type(self):
+        return self.estimator._estimator_type
+
+    def fit(self, X, y, feature_axis=2):
+        """Fit the GeneticSelectionCV model and then the underlying estimator on the selected
+           features.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix}, shape = [n_samples, n_features]
+            The training input samples.
+
+        y : array-like, shape = [n_samples]
+            The target values.
+        """
+        return self._fit(X, y, feature_axis=feature_axis)
+
+    def _fit(self, X, y, feature_axis=2):
+        X, y = check_ts_X_y(X, y, "csr")
+        # Initialization
+        cv = check_cv(self.cv, y, is_classifier(self.estimator))
+        scorer = check_scoring(self.estimator, scoring=self.scoring)
+        n_features = X.shape[feature_axis]
+
+        if self.max_features is not None:
+            if not isinstance(self.max_features, numbers.Integral):
+                raise TypeError("'max_features' should be an integer between 1 and {} features."
+                                " Got {!r} instead."
+                                .format(n_features, self.max_features))
+            elif self.max_features < 1 or self.max_features > n_features:
+                raise ValueError("'max_features' should be between 1 and {} features."
+                                 " Got {} instead."
+                                 .format(n_features, self.max_features))
+            max_features = self.max_features
+        else:
+            max_features = n_features
+
+        if not isinstance(self.n_gen_no_change, (numbers.Integral, np.integer, type(None))):
+            raise ValueError("'n_gen_no_change' should either be None or an integer."
+                             " {} was passed."
+                             .format(self.n_gen_no_change))
+
+        estimator = clone(self.estimator)
+
+        # Genetic Algorithm
+        toolbox = base.Toolbox()
+
+        toolbox.register("attr_bool", random.randint, 0, 1)
+        toolbox.register("individual", tools.initRepeat,
+                         creator.Individual, toolbox.attr_bool, n=n_features)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        toolbox.register("evaluate", _evalFunction, gaobject=self, estimator=estimator, X=X, y=y,
+                         cv=cv, scorer=scorer, verbose=self.verbose, fit_params=self.fit_params,
+                         max_features=max_features, caching=self.caching, feature_axis=feature_axis)
+        toolbox.register("mate", tools.cxUniform, indpb=self.crossover_independent_proba)
+        toolbox.register("mutate", tools.mutFlipBit, indpb=self.mutation_independent_proba)
+        toolbox.register("select", tools.selTournament, tournsize=self.tournament_size)
+
+        if self.n_jobs == 0:
+            raise ValueError("n_jobs == 0 has no meaning.")
+        elif self.n_jobs > 1:
+            pool = multiprocessing.Pool(processes=self.n_jobs)
+            toolbox.register("map", pool.map)
+        elif self.n_jobs < 0:
+            pool = multiprocessing.Pool(processes=max(cpu_count() + 1 + self.n_jobs, 1))
+            toolbox.register("map", pool.map)
+
+        pop = toolbox.population(n=self.n_population)
+        hof = tools.HallOfFame(1, similar=np.array_equal)
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        stats.register("avg", np.mean, axis=0)
+        stats.register("std", np.std, axis=0)
+        stats.register("min", np.min, axis=0)
+        stats.register("max", np.max, axis=0)
+
+        if self.verbose > 0:
+            print("Selecting features with genetic algorithm.")
+
+        _, log = _eaFunction(pop, toolbox, cxpb=self.crossover_proba, mutpb=self.mutation_proba,
+                             ngen=self.n_generations, ngen_no_change=self.n_gen_no_change,
+                             stats=stats, halloffame=hof, verbose=self.verbose)
+        if self.n_jobs != 1:
+            pool.close()
+            pool.join()
+
+        # Set final attributes
+        support_ = np.array(hof, dtype=np.bool)[0]
+        self.estimator_ = clone(self.estimator)
+        _X = apply_mask(X, support_, feature_axis=feature_axis)
+        self.estimator_.fit(_X, y)
+
+        self.generation_scores_ = np.array([score for score, _ in log.select("max")])
+        self.n_features_ = support_.sum()
+        self.support_ = support_
+
+        return self
+
+    @if_delegate_has_method(delegate='estimator')
+    def predict(self, X):
+        """Reduce X to the selected features and then predict using the
+           underlying estimator.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        Returns
+        -------
+        y : array of shape [n_samples]
+            The predicted target values.
+        """
+        return self.estimator_.predict(self.transform(X))
+
+    @if_delegate_has_method(delegate='estimator')
+    def score(self, X, y):
+        """Reduce X to the selected features and then return the score of the
+           underlying estimator.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        y : array of shape [n_samples]
+            The target values.
+        """
+        return self.estimator_.score(self.transform(X), y)
+
+    def _get_support_mask(self):
+        return self.support_
+
+    @if_delegate_has_method(delegate='estimator')
+    def decision_function(self, X):
+        return self.estimator_.decision_function(self.transform(X))
+
+    @if_delegate_has_method(delegate='estimator')
+    def predict_proba(self, X):
+        return self.estimator_.predict_proba(self.transform(X))
+
+    @if_delegate_has_method(delegate='estimator')
+    def predict_log_proba(self, X):
+        return self.estimator_.predict_log_proba(self.transform(X))
+
+    def transform(self, X, feature_axis=2):
+        """Reduce X to the selected features.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        Returns
+        -------
+        X_r : array of shape [n_samples, n_selected_features]
+            The input samples with only the selected features.
+        """
+        X = check_ts_array(X, dtype=None, accept_sparse='csr')
+        mask = self.get_support()
+        if not mask.any():
+            warn("No features were selected: either the data is"
+                 " too noisy or the selection test too strict.",
+                 UserWarning)
+            shape = tuple([X.shape[i] if i != feature_axis else 0 for i in range(len(X.shape))])
+            return np.empty(0).reshape(shape)
+        if len(mask) != X.shape[feature_axis]:
+            raise ValueError("X has a different shape than during fitting.")
+        _X = apply_mask(X, safe_mask(X, mask), feature_axis=feature_axis)
+        return _X
+
+    def inverse_transform(self, X, feature_axis=2):
+        """
+        Reverse the transformation operation
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_selected_features]
+            The input samples.
+
+        Returns
+        -------
+        X_r : array of shape [n_samples, n_original_features]
+            `X` with columns of zeros inserted where features would have
+            been removed by `transform`.
+        """
+        # TODO: Deal with sparse matrix.
+        if issparse(X):
+            raise NotImplementedError("Sparse matrix is unavailable for now.")
+
+        support = self.get_support()
+        X = check_ts_array(X, dtype=None)
+        if support.sum() != X.shape[feature_axis]:
+            raise ValueError("X has a different shape than during fitting.")
+
+        if X.ndim != 3:
+            raise ValueError("X must be 3 dimensional.")
+
+        shape = tuple([X.shape[i] if i != feature_axis else support.size for i in range(len(X.shape))])
+        Xt = np.zeros(shape, dtype=X.dtype)
+        if feature_axis == 0:
+            Xt[support,:,:] = X
+        elif feature_axis == 1:
+            Xt[:,support,:] = X
+        else:
+            Xt[:,:,support] = X
+        return Xt
